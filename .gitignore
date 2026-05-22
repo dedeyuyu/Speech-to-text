@@ -1,0 +1,41 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.spec
+
+# Virtual environments
+venv/
+env/
+.env
+.env.*
+
+# Secrets and credentials
+*.key
+*.pem
+*.token
+secrets.json
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/settings.json
+.idea/
+
+# Data files (user recordings and transcripts are stored locally, not in repo)
+data/recordings/
+data/transcripts/
+
+# Whisper model cache (downloaded by user)
+# ~/.cache/whisper/
+
+# Temporary audio files
+*.tmp.wav
+*.tmp.mp3

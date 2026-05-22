@@ -1,0 +1,91 @@
+name: 构建发布 & 生成构建证明
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+permissions:
+  contents: write       # 创建 Release 和上传 Asset
+  id-token: write       # 生成 OIDC token（Attestation 必需）
+  attestations: write   # 写入构建证明
+
+jobs:
+  build-and-release:
+    name: 构建 Windows 可执行文件
+    runs-on: windows-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r requirements.txt
+
+      - name: 使用 PyInstaller 打包
+        run: |
+          pyinstaller --onefile --windowed `
+            --name "WhisperSTT" `
+            --add-data "ui;ui" `
+            --add-data "core;core" `
+            --hidden-import "sounddevice" `
+            --hidden-import "soundfile" `
+            --hidden-import "whisper" `
+            main.py
+
+      - name: 计算 SHA256 校验和
+        id: sha256
+        run: |
+          $hash = (Get-FileHash dist\WhisperSTT.exe -Algorithm SHA256).Hash.ToLower()
+          echo "hash=$hash" >> $env:GITHUB_OUTPUT
+          echo "SHA256: $hash" > dist\WhisperSTT.exe.sha256.txt
+        shell: powershell
+
+      - name: 创建 GitHub Release 并上传文件
+        id: release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "Whisper 语音转文字 ${{ github.ref_name }}"
+          body: |
+            ## 🎙 Whisper 语音转文字 ${{ github.ref_name }}
+
+            ### 安装说明
+            1. 下载 `WhisperSTT.exe`
+            2. 首次运行会自动下载 Whisper small 模型（约 244MB）
+            3. 运行后点击 ⏺ 按钮开始录音
+
+            ### 隐私说明
+            - ✅ 所有录音和文字数据仅保存在本地
+            - ✅ 模型下载完成后可完全离线使用
+            - ✅ 无任何遥测或数据上传
+
+            ### SHA256 校验和
+            ```
+            ${{ steps.sha256.outputs.hash }}  WhisperSTT.exe
+            ```
+          files: |
+            dist/WhisperSTT.exe
+            dist/WhisperSTT.exe.sha256.txt
+          draft: false
+          prerelease: false
+
+      - name: 生成构建证明（SLSA Provenance）
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: dist/WhisperSTT.exe
+
+      - name: 生成构建证明（校验和文件）
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: dist/WhisperSTT.exe.sha256.txt
