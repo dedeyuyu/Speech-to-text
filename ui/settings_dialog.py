@@ -21,6 +21,7 @@ from ui.styles import (
     COLOR_BG_ELEVATED, COLOR_BORDER, COLOR_ACCENT, COLOR_TEXT_MUTED,
 )
 from core.autostart import enable_autostart, disable_autostart, is_autostart_enabled
+from core.audio_devices import enumerate_devices, AudioDevice
 
 
 # ─── 快捷键输入框 ──────────────────────────────────────────
@@ -102,7 +103,8 @@ class SettingsDialog(QDialog):
     # 发出信号，通知主窗口配置变更
     hotkey_changed = pyqtSignal(str)
     auto_output_changed = pyqtSignal(bool)
-    language_changed = pyqtSignal(object)  # str or None
+    language_changed = pyqtSignal(object)   # str or None
+    device_changed = pyqtSignal(object)     # AudioDevice or None
 
     def __init__(self, config: dict, parent=None):
         super().__init__(parent)
@@ -169,6 +171,80 @@ class SettingsDialog(QDialog):
 
         output_group.layout().addLayout(out_layout)
         layout.addWidget(output_group)
+
+        # ── 麦克风 / 音频设备 ─────────────────────────────
+        mic_group = self._make_group("🎤  麦克风 / 音频设备")
+        mic_vbox = QVBoxLayout()
+
+        mic_desc = QLabel(
+            "选择录音来源：麦克风、虚拟声卡（如 VoiceMeeter）或电脑系统声音。\n"
+            "🔊 系统声音 = 录制电脑正在播放的内容（需要 WASAPI 支持）。"
+        )
+        mic_desc.setStyleSheet(f"color: {COLOR_TEXT_MUTED}; font-size: 11px;")
+        mic_desc.setWordWrap(True)
+        mic_vbox.addWidget(mic_desc)
+
+        mic_row = QHBoxLayout()
+        mic_lbl = QLabel("设备：")
+        mic_lbl.setStyleSheet(f"color: {COLOR_TEXT_PRIMARY};")
+        self._device_combo = QComboBox()
+        self._device_combo.setMinimumWidth(300)
+
+        # 枚举设备并填入下拉框
+        self._audio_devices = []   # List[AudioDevice | None]
+        self._device_combo.addItem("🎤  系统默认麦克风", None)
+        self._audio_devices.append(None)  # None = 使用系统默认
+
+        try:
+            devices = enumerate_devices()
+            input_devs  = [d for d in devices if not d.is_loopback]
+            loopback_devs = [d for d in devices if d.is_loopback]
+
+            if input_devs:
+                self._device_combo.insertSeparator(self._device_combo.count())
+                self._device_combo.addItem("── 麦克风 / 输入设备 ──", "__sep__")
+                for dev in input_devs:
+                    label = f"🎤  {dev.name}  [{dev.hostapi}]"
+                    if dev.is_default:
+                        label += "  ← 默认"
+                    self._device_combo.addItem(label, dev)
+                    self._audio_devices.append(dev)
+
+            if loopback_devs:
+                self._device_combo.insertSeparator(self._device_combo.count())
+                self._device_combo.addItem("── 🔊 系统声音（环回录制）──", "__sep__")
+                for dev in loopback_devs:
+                    label = f"🔊  {dev.name}"
+                    if dev.is_default:
+                        label += "  ← 默认"
+                    self._device_combo.addItem(label, dev)
+                    self._audio_devices.append(dev)
+        except Exception as e:
+            self._device_combo.addItem(f"[枚举失败: {e}]", None)
+
+        # 恢复上次选择的设备
+        saved_device = self._config.get("audio_device", None)
+        if saved_device and isinstance(saved_device, dict):
+            saved_name = saved_device.get("name", "")
+            saved_loopback = saved_device.get("is_loopback", False)
+            for i in range(self._device_combo.count()):
+                d = self._device_combo.itemData(i)
+                if isinstance(d, AudioDevice):
+                    if d.name == saved_name and d.is_loopback == saved_loopback:
+                        self._device_combo.setCurrentIndex(i)
+                        break
+
+        refresh_btn = QPushButton("🔄 刷新")
+        refresh_btn.setFixedWidth(72)
+        refresh_btn.setObjectName("actionButton")
+        refresh_btn.clicked.connect(self._refresh_devices)
+
+        mic_row.addWidget(mic_lbl)
+        mic_row.addWidget(self._device_combo, 1)
+        mic_row.addWidget(refresh_btn)
+        mic_vbox.addLayout(mic_row)
+        mic_group.layout().addLayout(mic_vbox)
+        layout.addWidget(mic_group)
 
         # ── 语言设置 ─────────────────────────────────────
         lang_group = self._make_group("🌍  识别语言")
@@ -258,19 +334,68 @@ class SettingsDialog(QDialog):
         group.setLayout(QVBoxLayout())
         return group
 
+    def _refresh_devices(self):
+        """重新枚举设备并刷新下拉框。"""
+        # 记住当前选中
+        current_data = self._device_combo.currentData()
+        self._device_combo.clear()
+        self._audio_devices.clear()
+
+        self._device_combo.addItem("🎤  系统默认麦克风", None)
+        self._audio_devices.append(None)
+
+        try:
+            devices = enumerate_devices()
+            input_devs    = [d for d in devices if not d.is_loopback]
+            loopback_devs = [d for d in devices if d.is_loopback]
+
+            if input_devs:
+                self._device_combo.insertSeparator(self._device_combo.count())
+                self._device_combo.addItem("── 麦克风 / 输入设备 ──", "__sep__")
+                for dev in input_devs:
+                    label = f"🎤  {dev.name}  [{dev.hostapi}]"
+                    if dev.is_default:
+                        label += "  ← 默认"
+                    self._device_combo.addItem(label, dev)
+                    self._audio_devices.append(dev)
+
+            if loopback_devs:
+                self._device_combo.insertSeparator(self._device_combo.count())
+                self._device_combo.addItem("── 🔊 系统声音（环回录制）──", "__sep__")
+                for dev in loopback_devs:
+                    label = f"🔊  {dev.name}"
+                    if dev.is_default:
+                        label += "  ← 默认"
+                    self._device_combo.addItem(label, dev)
+                    self._audio_devices.append(dev)
+        except Exception as e:
+            self._device_combo.addItem(f"[枚举失败: {e}]", None)
+
+        # 尝试恢复之前选中的设备
+        if isinstance(current_data, AudioDevice):
+            for i in range(self._device_combo.count()):
+                d = self._device_combo.itemData(i)
+                if isinstance(d, AudioDevice) and d.name == current_data.name:
+                    self._device_combo.setCurrentIndex(i)
+                    break
+
     def _save(self):
         new_hotkey = self._hotkey_edit.text().strip()
         if not new_hotkey:
             QMessageBox.warning(self, "快捷键无效", "请设置一个有效的快捷键。")
             return
 
-        # ⚠️ 必须在修改 self._config 之前保存旧值，否则比较永远相等
-        old_hotkey = self._config.get("hotkey", "")
-
         # 更新配置
         self._config["hotkey"] = new_hotkey
         self._config["auto_output"] = self._auto_output_cb.isChecked()
         self._config["language"] = self._lang_combo.currentData()
+
+        # 保存选中的音频设备
+        selected_device = self._device_combo.currentData()
+        if isinstance(selected_device, AudioDevice):
+            self._config["audio_device"] = selected_device.to_dict()
+        else:
+            self._config["audio_device"] = None  # 使用系统默认
 
         # 开机启动
         if self._autostart_cb.isChecked():
@@ -279,10 +404,13 @@ class SettingsDialog(QDialog):
             disable_autostart()
         self._config["autostart"] = self._autostart_cb.isChecked()
 
-        # 发出信号：只要快捷键有值就始终注册（确保生效）
+        # 发出信号
         self.hotkey_changed.emit(new_hotkey)
         self.auto_output_changed.emit(self._config["auto_output"])
         self.language_changed.emit(self._config["language"])
+        self.device_changed.emit(
+            selected_device if isinstance(selected_device, AudioDevice) else None
+        )
 
         self.accept()
 

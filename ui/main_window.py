@@ -41,6 +41,7 @@ from core.config import load_config, save_config
 from core.hotkey import HotkeyManager
 from core.output_engine import OutputEngine
 from core.punctuation import add_punctuation
+from core.audio_devices import AudioDevice, enumerate_devices
 from ui.floating_indicator import FloatingIndicator
 from ui.styles import (
     MAIN_STYLE,
@@ -155,9 +156,13 @@ class MainWindow(QMainWindow):
         self._quitting = False   # 真正退出（区别于最小化到托盘）
 
         # ── 核心模块 ──────────────────────────────────────
+        # 恢复上次保存的音频设备
+        self._active_device: AudioDevice | None = self._load_saved_device()
+
         self._recorder = AudioRecorder(
             on_audio_chunk=self._on_audio_chunk,
             on_error=self._on_recorder_error,
+            device=self._active_device,
         )
         self._transcriber = RealtimeTranscriber(
             model_name=self._config.get("model", "small"),
@@ -306,7 +311,7 @@ class MainWindow(QMainWindow):
             f"font-size: 30px; font-weight: 700; color: {COLOR_TEXT_PRIMARY}; "
             f"font-family: 'Courier New', monospace;"
         )
-        self._mic_label = QLabel(f"🎤 {AudioRecorder.get_default_input_device()}")
+        self._mic_label = QLabel(self._mic_label_text())
         self._mic_label.setObjectName("infoLabel")
         info_col.addWidget(self._record_status_label)
         info_col.addWidget(self._timer_label)
@@ -783,6 +788,7 @@ class MainWindow(QMainWindow):
         dlg.hotkey_changed.connect(self._register_hotkey)
         dlg.auto_output_changed.connect(self._on_auto_output_changed)
         dlg.language_changed.connect(self._on_language_changed)
+        dlg.device_changed.connect(self._on_device_changed)
         if dlg.exec():
             self._config = dlg.get_config()
             save_config(self._config)
@@ -797,6 +803,43 @@ class MainWindow(QMainWindow):
     def _on_language_changed(self, lang):
         self._transcriber.language = lang
         self._config["language"] = lang
+
+    def _on_device_changed(self, device: AudioDevice | None):
+        """用户在设置中切换音频设备后调用。"""
+        if self._is_recording:
+            self._stop_recording()
+        self._active_device = device
+        self._recorder.set_device(device)
+        self._mic_label.setText(self._mic_label_text())
+        save_config(self._config)
+
+    def _mic_label_text(self) -> str:
+        """生成当前麦克风标签文字。"""
+        dev = self._active_device
+        if dev is None:
+            try:
+                name = AudioRecorder.get_default_input_device()
+            except Exception:
+                name = "系统默认"
+            return f"🎤 {name}"
+        icon = "🔊" if dev.is_loopback else "🎤"
+        return f"{icon} {dev.name}"
+
+    def _load_saved_device(self) -> AudioDevice | None:
+        """从配置文件恢复上次选择的音频设备，找不到时返回 None（系统默认）。"""
+        saved = self._config.get("audio_device", None)
+        if not saved or not isinstance(saved, dict):
+            return None
+        try:
+            saved_name = saved.get("name", "")
+            saved_loopback = saved.get("is_loopback", False)
+            devices = enumerate_devices()
+            for dev in devices:
+                if dev.name == saved_name and dev.is_loopback == saved_loopback:
+                    return dev
+        except Exception:
+            pass
+        return None
 
     def _show_model_dialog(self):
         from ui.model_download_dialog import ModelDownloadDialog
