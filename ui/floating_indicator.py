@@ -113,23 +113,23 @@ class FloatingIndicator(QWidget):
     # ─────────────────────────────────────────
 
     def paintEvent(self, event):
+        from PyQt6.QtCore import QRectF
+
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        w, h = self.W, self.H
-        r = h // 2  # 胶囊圆角半径
+        w, h = float(self.W), float(self.H)
+        r = h / 2  # 胶囊圆角半径
 
         # ── 背景（半透明深色胶囊）───────────────────────
         path = QPainterPath()
-        path.addRoundedRect(0, 0, w, h, r, r)
+        path.addRoundedRect(QRectF(0, 0, w, h), r, r)
 
-        # 背景渐变：左深右稍亮
         bg_grad = QLinearGradient(0, 0, w, 0)
         bg_grad.setColorAt(0.0, QColor(10, 12, 22, 210))
         bg_grad.setColorAt(1.0, QColor(18, 20, 38, 210))
         painter.setBrush(QBrush(bg_grad))
 
-        # 边框微光
         border_grad = QLinearGradient(0, 0, w, 0)
         border_grad.setColorAt(0.0, QColor(0, 220, 255, 80))
         border_grad.setColorAt(0.5, QColor(170, 50, 255, 80))
@@ -138,61 +138,62 @@ class FloatingIndicator(QWidget):
         painter.drawPath(path)
 
         # ── 频率条 ───────────────────────────────────────
-        PAD_LEFT = 14
-        PAD_RIGHT = 90    # 右侧留给状态文字
+        PAD_LEFT = 14.0
+        PAD_RIGHT = 90.0
         bar_area_w = w - PAD_LEFT - PAD_RIGHT
         spacing = bar_area_w / self.BAR_COUNT
         bar_w = max(2.0, spacing - 1.5)
-        center_y = h / 2
+        center_y = h / 2.0
 
         for i, raw_level in enumerate(self._levels):
-            progress = i / max(1, self.BAR_COUNT - 1)   # 0.0 → 1.0
+            progress = i / max(1, self.BAR_COUNT - 1)
 
-            # 呼吸 + 实际音量叠加
             breath = 0.12 * math.sin(self._phase + i * 0.35)
             level = raw_level * 0.85 + breath + 0.06
             level = max(0.06, min(1.0, level))
 
-            bar_h = max(4, int(level * (h - 14)))
-
+            bar_h = max(4.0, level * (h - 14.0))
             x = PAD_LEFT + i * spacing
 
-            # 渐变色：青色 (#00e5ff) → 蓝紫 (#7c4dff) → 亮紫 (#ea00ff)
+            # 渐变色：青色 → 蓝紫 → 亮紫
             if progress < 0.5:
                 t = progress * 2
-                rc = int(0   + t * 80)
+                rc = int(t * 80)
                 gc = int(229 - t * 155)
                 bc = 255
             else:
                 t = (progress - 0.5) * 2
-                rc = int(80  + t * 170)
-                gc = int(74  - t * 74)
+                rc = int(80 + t * 170)
+                gc = int(74 - t * 74)
                 bc = int(255 - t * 50)
 
-            # 透明度随音量增强
             alpha = int(140 + 115 * level)
             color = QColor(rc, gc, bc, alpha)
 
-            # 顶部发光效果（亮一个档）
+            # 顶部发光（亮一档）
             glow = QColor(rc, gc, bc, min(255, alpha + 60))
             painter.setBrush(QBrush(glow))
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.drawRoundedRect(x, center_y - bar_h / 2, bar_w, 3, 1, 1)
+            painter.drawRoundedRect(
+                QRectF(x, center_y - bar_h / 2, bar_w, 3.0), 1.0, 1.0
+            )
 
+            # 主频率条
             painter.setBrush(QBrush(color))
-            painter.drawRoundedRect(x, center_y - bar_h / 2, bar_w, bar_h, 1.5, 1.5)
+            painter.drawRoundedRect(
+                QRectF(x, center_y - bar_h / 2, bar_w, bar_h), 1.5, 1.5
+            )
 
         # ── 右侧状态区 ───────────────────────────────────
-        text_x = w - PAD_RIGHT + 4
-        text_w = PAD_RIGHT - 10
+        text_x = w - PAD_RIGHT + 4.0
+        text_w = PAD_RIGHT - 10.0
 
         # 脉冲红点
         dot_alpha = int(180 + 75 * math.sin(self._phase * 1.8))
         painter.setBrush(QBrush(QColor(255, 70, 70, dot_alpha)))
-        dot_size = 9
+        dot_size = 9.0
         painter.drawEllipse(
-            int(text_x + 2), int(center_y - dot_size / 2),
-            dot_size, dot_size
+            QRectF(text_x + 2, center_y - dot_size / 2, dot_size, dot_size)
         )
 
         # "录音中" 文字
@@ -200,7 +201,7 @@ class FloatingIndicator(QWidget):
         font = QFont("Microsoft YaHei UI", 9, QFont.Weight.Medium)
         painter.setFont(font)
         painter.drawText(
-            QRect(int(text_x + 14), int(center_y - 11), text_w - 14, 14),
+            QRect(int(text_x + 14), int(center_y - 11), int(text_w - 14), 14),
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
             "录音中"
         )
@@ -211,12 +212,13 @@ class FloatingIndicator(QWidget):
             small_font = QFont("Microsoft YaHei UI", 7)
             painter.setFont(small_font)
             painter.drawText(
-                QRect(int(text_x + 14), int(center_y + 2), text_w - 14, 12),
+                QRect(int(text_x + 14), int(center_y + 2), int(text_w - 14), 12),
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                 self._device_label
             )
 
         painter.end()
+
 
     # ─────────────────────────────────────────
     # 鼠标交互（点击切换录音）
