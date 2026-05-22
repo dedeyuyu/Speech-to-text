@@ -53,7 +53,7 @@ jobs:
 
       - name: 创建 GitHub Release 并上传文件
         id: release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
           name: "Whisper 语音转文字 ${{ github.ref_name }}"
