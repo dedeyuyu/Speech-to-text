@@ -263,6 +263,9 @@ class SettingsDialog(QDialog):
             QMessageBox.warning(self, "快捷键无效", "请设置一个有效的快捷键。")
             return
 
+        # ⚠️ 必须在修改 self._config 之前保存旧值，否则比较永远相等
+        old_hotkey = self._config.get("hotkey", "")
+
         # 更新配置
         self._config["hotkey"] = new_hotkey
         self._config["auto_output"] = self._auto_output_cb.isChecked()
@@ -275,16 +278,12 @@ class SettingsDialog(QDialog):
             disable_autostart()
         self._config["autostart"] = self._autostart_cb.isChecked()
 
-        # 发出信号
-        if new_hotkey != self._original_hotkey():
-            self.hotkey_changed.emit(new_hotkey)
+        # 发出信号：只要快捷键有值就始终注册（确保生效）
+        self.hotkey_changed.emit(new_hotkey)
         self.auto_output_changed.emit(self._config["auto_output"])
         self.language_changed.emit(self._config["language"])
 
         self.accept()
-
-    def _original_hotkey(self) -> str:
-        return self._config.get("hotkey", "ctrl+alt+r")
 
     def get_config(self) -> dict:
         return self._config
