@@ -18,20 +18,49 @@ import time
 import numpy as np
 
 # ── PyInstaller 打包路径修复 ────────────────────────────────
-# 当以 --onefile 模式打包时，whisper 的资源文件（mel_filters.npz,
-# multilingual.tiktoken 等）被解压到 _MEI* 临时目录。
-# 必须在 import whisper 之前，将该目录添加到模块搜索路径。
 if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
     _mei = sys._MEIPASS
-    # 将 _MEIPASS 加入 sys.path，whisper 才能找到自己的 assets
     if _mei not in sys.path:
         sys.path.insert(0, _mei)
-    # 同时设置环境变量，确保 whisper 能定位 assets 目录
     _whisper_assets = os.path.join(_mei, "whisper", "assets")
     if os.path.isdir(_whisper_assets):
         os.environ["WHISPER_ASSETS_DIR"] = _whisper_assets
 
+import torch
 import whisper
+
+
+# ── 设备自动选择 ─────────────────────────────────────────────
+
+def _select_device() -> str:
+    """
+    自动选择最优计算设备：
+      1. NVIDIA GPU (CUDA)
+      2. Apple Silicon (MPS)
+      3. CPU（使用全部核心）
+    """
+    if torch.cuda.is_available():
+        return "cuda"
+    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        return "mps"
+    # CPU 模式：使用全部核心，提升并行度
+    cores = os.cpu_count() or 4
+    torch.set_num_threads(cores)
+    return "cpu"
+
+
+def _device_display_name(device: str) -> str:
+    """返回用于 UI 显示的设备名称。"""
+    if device == "cuda":
+        try:
+            name = torch.cuda.get_device_name(0)
+            return f"GPU ⚡ {name[:20]}"
+        except Exception:
+            return "GPU ⚡ CUDA"
+    if device == "mps":
+        return "GPU ⚡ Apple Silicon"
+    cores = os.cpu_count() or 4
+    return f"CPU ({cores} 核)"
 
 
 # 音频参数（需与 recorder.py 保持一致）
@@ -82,6 +111,8 @@ class RealtimeTranscriber:
         self._model = None
         self._model_lock = threading.Lock()
         self._is_loaded = False
+        self._device = "cpu"          # 实际使用的设备
+        self._device_display = "CPU"  # UI 显示名称
 
         # 音频缓冲区（存储连续语音段）
         self._audio_buffer = np.array([], dtype=np.float32)
@@ -109,16 +140,27 @@ class RealtimeTranscriber:
         t.start()
 
     def _load_model(self):
-        """加载 Whisper 模型（可能需要下载，首次运行较慢）。"""
+        """加载 Whisper 模型（自动选择 GPU/CPU）。"""
         try:
+            device = _select_device()
             with self._model_lock:
-                self._model = whisper.load_model(self.model_name)
+                self._model = whisper.load_model(
+                    self.model_name,
+                    device=device,
+                )
                 self._is_loaded = True
+                self._device = device
+                self._device_display = _device_display_name(device)
             if self._on_model_loaded:
                 self._on_model_loaded()
         except Exception as e:
             if self._on_error:
                 self._on_error(e)
+
+    @property
+    def device_display(self) -> str:
+        """返回当前使用设备的显示名称（如 'GPU ⚡ RTX 3080'）。"""
+        return self._device_display
 
     @property
     def is_loaded(self):
@@ -163,10 +205,17 @@ class RealtimeTranscriber:
 
         try:
             with self._model_lock:
+                use_fp16 = (self._device == "cuda")  # GPU 用 FP16 更快
                 options = dict(
                     language=self.language,
-                    fp16=False,          # CPU 模式使用 FP32
+                    fp16=use_fp16,
                     task="transcribe",
+                    # 实时模式优先速度：贪婪解码（beam_size=1 最快）
+                    beam_size=1,
+                    best_of=1,
+                    temperature=0,
+                    # 不依赖上下文，避免幻觉且更快
+                    condition_on_previous_text=False,
                 )
                 result = self._model.transcribe(audio_to_transcribe, **options)
 

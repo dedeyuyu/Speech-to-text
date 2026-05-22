@@ -41,6 +41,7 @@ from core.config import load_config, save_config
 from core.hotkey import HotkeyManager
 from core.output_engine import OutputEngine
 from core.punctuation import add_punctuation
+from ui.floating_indicator import FloatingIndicator
 from ui.styles import (
     MAIN_STYLE,
     STATUS_DOT_IDLE, STATUS_DOT_RECORDING,
@@ -168,6 +169,11 @@ class MainWindow(QMainWindow):
         self._hotkey_mgr = HotkeyManager()
         self._output_engine = OutputEngine()
         self._output_engine.set_auto_output(self._config.get("auto_output", False))
+
+        # 屏幕底部悬浮指示器
+        self._floating = FloatingIndicator(
+            toggle_callback=self._toggle_recording
+        )
 
         self._setup_ui()
         self._setup_tray()
@@ -538,7 +544,13 @@ class MainWindow(QMainWindow):
         self._record_btn.setEnabled(True)
         self._progress_bar.setVisible(False)
         self._record_status_label.setText("就绪，点击或按快捷键开始录音")
-        self._update_status("模型加载完成 ✓", "idle")
+        device_info = self._transcriber.device_display
+        self._update_status(f"模型加载完成 ✓  ·  {device_info}", "idle")
+        self.statusBar().showMessage(
+            f"就绪  ·  {device_info}  ·  数据路径：{self._storage.data_dir}"
+        )
+        # 把设备信息显示在悬浮指示器上
+        self._floating.set_device_label(device_info)
         self._transcriber.start_worker()
         self._load_history()
 
@@ -590,6 +602,8 @@ class MainWindow(QMainWindow):
         self._level_timer.start()
         self._transcriber.reset_buffer()
         self._recorder.start()
+        # 显示悬浮指示器
+        self._floating.start_recording()
 
     def _stop_recording(self):
         self._is_recording = False
@@ -608,6 +622,8 @@ class MainWindow(QMainWindow):
         self._waveform.set_recording(False)
         self._update_status("识别中…", "processing")
         self._tray_record_action.setText("⏺ 开始录音")
+        # 隐藏悬浮指示器
+        self._floating.stop_recording()
 
     # ─────────────────────────────────────────
     # 音频回调
@@ -872,6 +888,7 @@ class MainWindow(QMainWindow):
         self.sig_transcript_received.connect(self._append_transcript)
         self.sig_status_update.connect(self._update_status)
         self.sig_level_update.connect(self._waveform.update_level)
+        self.sig_level_update.connect(self._floating.update_level)  # 同步给悬浮指示器
         self.sig_toggle_recording.connect(self._toggle_recording)
 
         self._elapsed_timer = QTimer(self)
