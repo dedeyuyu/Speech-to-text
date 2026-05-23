@@ -4,7 +4,12 @@ soundfile>=0.12.1
 numpy>=1.24.0
 PyQt6>=6.6.0
 torch>=2.0.0
-keyboard>=0.13.5
 pyperclip>=1.8.2
-pywin32>=306
 requests>=2.31.0
+
+# Windows 专用
+keyboard>=0.13.5; sys_platform == "win32"
+pywin32>=306; sys_platform == "win32"
+
+# macOS 专用（全局快捷键 + 文字注入）
+pynput>=1.7.6; sys_platform == "darwin"

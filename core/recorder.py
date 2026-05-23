@@ -112,11 +112,17 @@ class AudioRecorder:
             )
 
         if dev.is_loopback:
-            # WASAPI 环回：录制输出设备正在播放的声音
+            # WASAPI 环回：录制输出设备正在播放的声音（仅 Windows）
+            import sys
+            if sys.platform != "win32":
+                raise RuntimeError(
+                    "系统声音环回录制仅支持 Windows（WASAPI）。\n"
+                    "macOS 上请安装 BlackHole 等虚拟音频设备，"
+                    "它们会出现在麦克风列表中。"
+                )
             try:
                 wasapi_settings = sd.WasapiSettings(loopback=True)
             except AttributeError:
-                # sounddevice 版本不支持 WasapiSettings → 降级到默认设备
                 raise RuntimeError(
                     "当前 sounddevice 版本不支持 WASAPI 环回录制，"
                     "请升级：pip install sounddevice --upgrade"

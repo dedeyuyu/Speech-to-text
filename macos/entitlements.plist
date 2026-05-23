@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- 麦克风权限 -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+    <!-- 辅助功能（全局热键 + 文字注入） -->
+    <key>com.apple.security.automation.apple-events</key>
+    <true/>
+    <!-- 沙箱关闭（需要访问文件系统和麦克风） -->
+    <key>com.apple.security.app-sandbox</key>
+    <false/>
+    <!-- 网络（下载模型） -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+</dict>
+</plist>

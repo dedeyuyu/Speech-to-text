@@ -17,7 +17,10 @@
 
 from dataclasses import dataclass, field
 from typing import List, Optional
+import sys
 import sounddevice as sd
+
+_IS_WINDOWS = sys.platform == "win32"
 
 
 @dataclass
@@ -85,34 +88,34 @@ def enumerate_devices() -> List[AudioDevice]:
             is_default=(idx == default_input_idx),
         ))
 
-    # ── 2. WASAPI 环回（系统声音）─────────────────────────────
-    # 检查是否存在 WASAPI 主机 API
-    wasapi_api_index = None
-    for api_idx, api in enumerate(hostapis):
-        if "wasapi" in api["name"].lower():
-            wasapi_api_index = api_idx
-            break
+    # ── 2. WASAPI 环回（系统声音）— 仅 Windows ─────────────────
+    # macOS 用户可安装 BlackHole 等虚拟设备，它们会出现在输入设备列表
+    if _IS_WINDOWS:
+        wasapi_api_index = None
+        for api_idx, api in enumerate(hostapis):
+            if "wasapi" in api["name"].lower():
+                wasapi_api_index = api_idx
+                break
 
-    if wasapi_api_index is not None:
-        try:
-            default_output_idx = sd.default.device[1]
-        except Exception:
-            default_output_idx = -1
+        if wasapi_api_index is not None:
+            try:
+                default_output_idx = sd.default.device[1]
+            except Exception:
+                default_output_idx = -1
 
-        for idx, dev in enumerate(all_devices):
-            if dev["max_output_channels"] < 1:
-                continue
-            if dev["hostapi"] != wasapi_api_index:
-                continue
-            # 不把耳机/扬声器等的输入端混进来（WASAPI 的 Input 侧已在上面列过）
-            result.append(AudioDevice(
-                index=idx,
-                name=dev["name"],
-                hostapi="WASAPI Loopback",
-                channels=min(dev["max_output_channels"], 2),
-                is_loopback=True,
-                is_default=(idx == default_output_idx),
-            ))
+            for idx, dev in enumerate(all_devices):
+                if dev["max_output_channels"] < 1:
+                    continue
+                if dev["hostapi"] != wasapi_api_index:
+                    continue
+                result.append(AudioDevice(
+                    index=idx,
+                    name=dev["name"],
+                    hostapi="WASAPI Loopback",
+                    channels=min(dev["max_output_channels"], 2),
+                    is_loopback=True,
+                    is_default=(idx == default_output_idx),
+                ))
 
     return result
 

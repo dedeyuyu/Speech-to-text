@@ -12,7 +12,10 @@ permissions:
   attestations: write
 
 jobs:
-  build-and-release:
+  # ════════════════════════════════════════════════════════════
+  # Windows 构建（exe + Inno Setup 安装程序）
+  # ════════════════════════════════════════════════════════════
+  build-windows:
     name: 构建 Windows 安装程序
     runs-on: windows-latest
 
@@ -43,11 +46,8 @@ jobs:
       - name: 使用 PyInstaller 打包（单文件 exe）
         shell: powershell
         run: |
-          # 找到 whisper 包的安装路径，提取其 assets 目录
           $whisperDir = python -c "import whisper, os; print(os.path.dirname(whisper.__file__))"
           Write-Host "Whisper path: $whisperDir"
-
-          # 找到 tiktoken 包路径（whisper 分词依赖）
           $tiktokenDir = python -c "import tiktoken, os; print(os.path.dirname(tiktoken.__file__))"
           Write-Host "Tiktoken path: $tiktokenDir"
 
@@ -87,7 +87,6 @@ jobs:
       - name: 构建 Inno Setup 安装程序
         run: |
           New-Item -ItemType Directory -Force -Path installer_output | Out-Null
-          # 动态查找 ISCC.exe
           $iscc = Get-ChildItem -Path "C:\Program Files (x86)" -Recurse -Filter "ISCC.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
           if (-not $iscc) {
             $iscc = Get-ChildItem -Path "C:\Program Files" -Recurse -Filter "ISCC.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -107,8 +106,194 @@ jobs:
           "$hash  $($installer.Name)" | Out-File -Encoding utf8 "installer_output\$($installer.Name).sha256.txt"
         shell: powershell
 
+      - name: 上传 Windows 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build
+          path: |
+            installer_output/*.exe
+            installer_output/*.sha256.txt
+            dist/WhisperSTT.exe
+            dist/WhisperSTT.exe.sha256.txt
+
+      - name: 生成构建证明（Windows）
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            installer_output/*.exe
+            dist/WhisperSTT.exe
+
+  # ════════════════════════════════════════════════════════════
+  # macOS 构建（.app + .dmg）
+  # ════════════════════════════════════════════════════════════
+  build-macos:
+    name: 构建 macOS 应用
+    runs-on: macos-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r requirements.txt
+
+      - name: 转换应用图标（ico → icns）
+        run: |
+          if [ ! -f "image.icns" ]; then
+            # 如果没有 .icns 文件，从 .ico 转换
+            mkdir -p image.iconset
+            # 生成各尺寸 PNG（使用 Python PIL 或 sips）
+            python3 -c "
+          from PIL import Image
+          import os
+          ico = Image.open('image.ico')
+          sizes = [16,32,64,128,256,512]
+          os.makedirs('image.iconset', exist_ok=True)
+          for s in sizes:
+              img = ico.resize((s,s), Image.LANCZOS).convert('RGBA')
+              img.save(f'image.iconset/icon_{s}x{s}.png')
+              img.save(f'image.iconset/icon_{s}x{s}@2x.png')
+          " 2>/dev/null || pip install pillow -q && python3 -c "
+          from PIL import Image
+          import os
+          ico = Image.open('image.ico')
+          sizes = [16,32,64,128,256,512]
+          os.makedirs('image.iconset', exist_ok=True)
+          for s in sizes:
+              img = ico.resize((s,s), Image.LANCZOS).convert('RGBA')
+              img.save(f'image.iconset/icon_{s}x{s}.png')
+              img.save(f'image.iconset/icon_{s}x{s}@2x.png')
+          "
+            iconutil -c icns image.iconset -o image.icns || echo "iconutil failed, continuing without icon"
+          fi
+          ls -la image.icns 2>/dev/null || echo "No icns file, PyInstaller will use default icon"
+
+      - name: 使用 PyInstaller 打包（.app bundle）
+        run: |
+          WHISPER_DIR=$(python -c "import whisper, os; print(os.path.dirname(whisper.__file__))")
+          echo "Whisper path: $WHISPER_DIR"
+
+          # 只有在图标存在时才添加 --icon 参数
+          ICON_FLAG=""
+          [ -f "image.icns" ] && ICON_FLAG="--icon image.icns"
+
+          pyinstaller --windowed \
+            --name "WhisperSTT" \
+            $ICON_FLAG \
+            --add-data "ui:ui" \
+            --add-data "core:core" \
+            --add-data "$WHISPER_DIR/assets:whisper/assets" \
+            --hidden-import "sounddevice" \
+            --hidden-import "soundfile" \
+            --hidden-import "whisper" \
+            --hidden-import "whisper.audio" \
+            --hidden-import "whisper.tokenizer" \
+            --hidden-import "whisper.model" \
+            --hidden-import "tiktoken" \
+            --hidden-import "tiktoken_ext" \
+            --hidden-import "tiktoken_ext.openai_public" \
+            --hidden-import "pynput" \
+            --hidden-import "pynput.keyboard" \
+            --hidden-import "pyperclip" \
+            --collect-data "whisper" \
+            --osx-bundle-identifier "com.whisper.stt" \
+            main.py
+
+      - name: 将 Info.plist 中添加麦克风使用说明
+        run: |
+          PLIST="dist/WhisperSTT.app/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c \
+            "Add :NSMicrophoneUsageDescription string '语音转文字需要访问麦克风'" \
+            "$PLIST" 2>/dev/null || \
+          /usr/libexec/PlistBuddy -c \
+            "Set :NSMicrophoneUsageDescription '语音转文字需要访问麦克风'" \
+            "$PLIST"
+
+      - name: 代码签名（ad-hoc，无证书）
+        run: |
+          codesign --force --deep --sign - \
+            --entitlements macos/entitlements.plist \
+            dist/WhisperSTT.app
+          echo "Ad-hoc signing complete"
+
+      - name: 安装 create-dmg
+        run: brew install create-dmg
+
+      - name: 创建 DMG 安装镜像
+        run: |
+          mkdir -p dmg_output
+          create-dmg \
+            --volname "WhisperSTT" \
+            --volicon "image.icns" \
+            --window-pos 200 120 \
+            --window-size 600 340 \
+            --icon-size 128 \
+            --icon "WhisperSTT.app" 160 165 \
+            --hide-extension "WhisperSTT.app" \
+            --app-drop-link 430 165 \
+            "dmg_output/WhisperSTT_macOS.dmg" \
+            "dist/WhisperSTT.app" \
+          || true   # create-dmg 在无图标时可能报错，忽略
+
+          # 如果 create-dmg 失败，用 hdiutil 生成简单 DMG
+          if [ ! -f "dmg_output/WhisperSTT_macOS.dmg" ]; then
+            hdiutil create -volname "WhisperSTT" \
+              -srcfolder "dist/WhisperSTT.app" \
+              -ov -format UDZO \
+              "dmg_output/WhisperSTT_macOS.dmg"
+          fi
+
+      - name: 计算 SHA256
+        id: macos_sha256
+        run: |
+          hash=$(shasum -a 256 dmg_output/WhisperSTT_macOS.dmg | awk '{print $1}')
+          echo "hash=$hash" >> $GITHUB_OUTPUT
+          echo "$hash  WhisperSTT_macOS.dmg" > dmg_output/WhisperSTT_macOS.dmg.sha256.txt
+
+      - name: 上传 macOS 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-build
+          path: |
+            dmg_output/WhisperSTT_macOS.dmg
+            dmg_output/WhisperSTT_macOS.dmg.sha256.txt
+
+      - name: 生成构建证明（macOS）
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: dmg_output/WhisperSTT_macOS.dmg
+
+  # ════════════════════════════════════════════════════════════
+  # 发布 Release（等待两个构建完成）
+  # ════════════════════════════════════════════════════════════
+  release:
+    name: 创建 GitHub Release
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 下载 Windows 产物
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-build
+          path: artifacts/windows
+
+      - name: 下载 macOS 产物
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-build
+          path: artifacts/macos
+
       - name: 创建 GitHub Release
-        id: release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
@@ -118,42 +303,40 @@ jobs:
 
             ### 📦 下载选项
 
-            | 文件 | 说明 | 适用场景 |
-            |------|------|---------|
-            | `WhisperSTT_Setup_*.exe` | **安装程序（推荐）** | 双击安装，含快捷方式 |
-            | `WhisperSTT.exe` | 便携版（单文件） | 免安装，直接运行 |
+            | 文件 | 平台 | 说明 |
+            |------|------|------|
+            | `WhisperSTT_Setup_*.exe` | 🪟 Windows | **安装程序（推荐）** |
+            | `WhisperSTT.exe` | 🪟 Windows | 便携版（免安装） |
+            | `WhisperSTT_macOS.dmg` | 🍎 macOS | DMG 安装镜像 |
 
-            ### ✨ v2.0 新功能
+            ### 🍎 macOS 安装说明
+
+            1. 打开 `WhisperSTT_macOS.dmg`，将 `WhisperSTT.app` 拖入"应用程序"文件夹
+            2. **首次运行**：右键点击 App → 「打开」（绕过 Gatekeeper 未知开发者警告）
+            3. 首次使用需授权：
+               - **麦克风**：系统偏好设置 → 隐私 → 麦克风
+               - **辅助功能**（全局热键 + 自动输出）：系统偏好设置 → 隐私 → 辅助功能
+
+            ### ✨ 功能特性
             - 🎹 **全局快捷键** — 任意位置开启/关闭录音（默认 Ctrl+Alt+R）
-            - 📤 **自动输出** — 识别文字自动粘贴到 Teams、Word 等任意输入框
+            - 📤 **自动输出** — 识别文字自动粘贴到任意输入框（Teams、Word 等）
+            - 🎤 **设备选择** — 支持麦克风、VoiceMeeter、系统声音环回（Windows）
             - 📝 **智能标点** — 自动添加中文逗号、句号、问号、感叹号
-            - 🤖 **模型管理** — 内置模型下载界面，支持 tiny/base/small/medium/large
+            - 🌍 **多语言** — 中文（简体/繁体）、英文、日文、韩文等
+            - 🤖 **模型管理** — 内置下载界面，支持 tiny/base/small/medium/large
             - 🔔 **系统托盘** — 关闭后后台运行，支持开机自启
-            - 🖼 **应用图标** — 任务栏和托盘图标
 
             ### 🔒 隐私说明
             - ✅ 所有录音和文字数据仅保存在本地
             - ✅ 模型下载完成后可完全离线使用
+            - ✅ 不上传任何录音或文字数据
 
-            ### SHA256 校验和
-            ```
-            安装程序: ${{ steps.installer_sha256.outputs.installer_hash }}
-            便携版:   ${{ steps.sha256.outputs.hash }}
-            ```
           files: |
-            installer_output/*.exe
-            installer_output/*.sha256.txt
-            dist/WhisperSTT.exe
-            dist/WhisperSTT.exe.sha256.txt
+            artifacts/windows/installer_output/*.exe
+            artifacts/windows/installer_output/*.sha256.txt
+            artifacts/windows/dist/WhisperSTT.exe
+            artifacts/windows/dist/WhisperSTT.exe.sha256.txt
+            artifacts/macos/WhisperSTT_macOS.dmg
+            artifacts/macos/WhisperSTT_macOS.dmg.sha256.txt
           draft: false
           prerelease: false
-
-      - name: 生成构建证明（安装程序）
-        uses: actions/attest-build-provenance@v4
-        with:
-          subject-path: installer_output/*.exe
-
-      - name: 生成构建证明（便携版）
-        uses: actions/attest-build-provenance@v4
-        with:
-          subject-path: dist/WhisperSTT.exe
