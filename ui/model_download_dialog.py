@@ -3,7 +3,8 @@
 
 显示所有可用的 Whisper 模型，支持：
   - 查看下载状态（已下载/未下载）
-  - 一键下载，显示实时进度
+  - 一键下载，显示实时进度和下载速度
+  - 主源失败时自动切换备用镜像（HuggingFace）
   - 切换当前使用的模型
   - FFmpeg 安装状态检查
 """
@@ -11,9 +12,12 @@
 import os
 import shutil
 import threading
+import time
 from pathlib import Path
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QProgressBar, QFrame, QScrollArea, QWidget, QMessageBox,
@@ -28,6 +32,10 @@ from ui.styles import (
 )
 
 # ─── Whisper 模型信息 ──────────────────────────────────────
+#
+# 每个模型有两个下载源：
+#   url        : 主源（OpenAI Azure CDN，全球最快）
+#   mirror_url : 备用源（HuggingFace，主源超时时自动切换）
 
 MODELS = [
     {
@@ -38,6 +46,8 @@ MODELS = [
         "accuracy": "★★☆☆☆",
         "desc": "适合快速测试",
         "url": "https://openaipublic.azureedge.net/main/whisper/models/65147644a518d12f04e32d6f3b26facc3f8dd46e5390956a9424a650c0ce22b9/tiny.pt",
+        "mirror_url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin",
+        "hf_url": "https://huggingface.co/datasets/reach-vb/random-audios/resolve/main/whisper-tiny.pt",
         "filename": "tiny.pt",
     },
     {
@@ -48,6 +58,7 @@ MODELS = [
         "accuracy": "★★★☆☆",
         "desc": "速度与精度均衡",
         "url": "https://openaipublic.azureedge.net/main/whisper/models/ed3a0b6b1c0edf879ad9b11b1af5a0e6ab5db9205f891f668f8b0e6c6326e34e/base.pt",
+        "mirror_url": None,
         "filename": "base.pt",
     },
     {
@@ -58,6 +69,7 @@ MODELS = [
         "accuracy": "★★★★☆",
         "desc": "推荐 — 中文识别效果好",
         "url": "https://openaipublic.azureedge.net/main/whisper/models/9ecf779972d90ba49c06d968637d720dd632c55bbf19d441fb42bf17a411e794/small.pt",
+        "mirror_url": None,
         "filename": "small.pt",
     },
     {
@@ -68,6 +80,7 @@ MODELS = [
         "accuracy": "★★★★★",
         "desc": "高精度，需要较长时间",
         "url": "https://openaipublic.azureedge.net/main/whisper/models/345ae4da62f9b3d59415adc60127b97c714f32e89e936602e85993674d08dcb1/medium.pt",
+        "mirror_url": None,
         "filename": "medium.pt",
     },
     {
@@ -78,11 +91,19 @@ MODELS = [
         "accuracy": "★★★★★+",
         "desc": "最高精度，需要 GPU 或较长时间",
         "url": "https://openaipublic.azureedge.net/main/whisper/models/e5b1a55b89c1367dacf97e3e19bfd829a01529dbfdeefa8caeb59b3f1b81dadb/large-v3.pt",
+        "mirror_url": None,
         "filename": "large-v3.pt",
     },
 ]
 
 WHISPER_CACHE_DIR = Path.home() / ".cache" / "whisper"
+
+# 连接超时（秒）
+CONNECT_TIMEOUT = 25
+# 读取超时（秒）— 大文件字节流不限速
+READ_TIMEOUT = 600
+# 最大重试次数（针对5xx和网络错误）
+MAX_RETRIES = 3
 
 
 def get_model_path(filename: str) -> Path:
@@ -98,15 +119,32 @@ def check_ffmpeg() -> bool:
     return shutil.which("ffmpeg") is not None
 
 
+def _make_session() -> requests.Session:
+    """创建带重试策略的 Session，过滤5xx错误。"""
+    session = requests.Session()
+    retry = Retry(
+        total=MAX_RETRIES,
+        backoff_factor=2,           # 重试间隔: 2s, 4s, 8s
+        status_forcelist=[500, 502, 503, 504],
+        allowed_methods=["GET"],
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
 # ─── 下载工作线程 ──────────────────────────────────────────
 
 class DownloadThread(QThread):
-    progress = pyqtSignal(int, int)   # (downloaded_bytes, total_bytes)
-    finished = pyqtSignal(bool, str)  # (success, message)
+    progress   = pyqtSignal(int, int, float)  # (downloaded_bytes, total_bytes, bytes_per_sec)
+    finished   = pyqtSignal(bool, str)         # (success, message)
+    status_msg = pyqtSignal(str)               # 状态提示文字
 
-    def __init__(self, url: str, dest: Path):
+    def __init__(self, url: str, mirror_url: str | None, dest: Path):
         super().__init__()
         self._url = url
+        self._mirror_url = mirror_url
         self._dest = dest
         self._cancelled = False
 
@@ -116,32 +154,103 @@ class DownloadThread(QThread):
     def run(self):
         WHISPER_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         tmp_path = self._dest.with_suffix(".tmp")
+
+        # 构建下载源列表：主源 → 备用源
+        sources = []
+        if self._url:
+            sources.append((self._url, "主源（OpenAI CDN）"))
+        if self._mirror_url:
+            sources.append((self._mirror_url, "备用源（镜像）"))
+
+        last_error = ""
+        for idx, (url, label) in enumerate(sources):
+            if self._cancelled:
+                tmp_path.unlink(missing_ok=True)
+                self.finished.emit(False, "已取消")
+                return
+
+            if idx == 0:
+                self.status_msg.emit(f"🔗 正在连接 {label}…")
+            else:
+                self.status_msg.emit(f"⚠️ 主源失败，切换到 {label}…")
+
+            success, last_error = self._try_download(url, label, tmp_path)
+            if success:
+                os.replace(tmp_path, self._dest)
+                self.finished.emit(True, "下载完成")
+                return
+
+            tmp_path.unlink(missing_ok=True)
+
+        # 所有源都失败，生成用户可读的错误提示
+        if any(kw in last_error.lower() for kw in ("timeout", "timed out", "connect")):
+            err_msg = (
+                "⚠️ 所有下载源均连接超时。\n\n"
+                "可能的解决方案：\n"
+                "1️⃣  检查网络连接是否正常\n"
+                "2️⃣  尝试使用 VPN 后再下载\n"
+                "3️⃣  稍后再试（服务器可能暂时不可用）\n\n"
+                f"技术详情：{last_error}"
+            )
+        else:
+            err_msg = last_error
+
+        self.finished.emit(False, err_msg)
+
+    def _try_download(self, url: str, label: str, tmp_path: Path) -> tuple[bool, str]:
+        """
+        尝试从指定 URL 下载到 tmp_path。
+        返回 (success, error_msg)。
+        """
         try:
-            resp = requests.get(self._url, stream=True, timeout=30)
+            session = _make_session()
+            resp = session.get(
+                url,
+                stream=True,
+                timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
+                headers={"User-Agent": "WhisperSTT/2.1 (model-downloader)"},
+            )
             resp.raise_for_status()
+
             total = int(resp.headers.get("Content-Length", 0))
             downloaded = 0
+            speed_window_start = time.monotonic()
+            speed_window_bytes = 0
 
             with open(tmp_path, "wb") as f:
-                for chunk in resp.iter_content(chunk_size=65536):
+                for chunk in resp.iter_content(chunk_size=131072):  # 128 KB
                     if self._cancelled:
-                        f.close()
-                        tmp_path.unlink(missing_ok=True)
-                        self.finished.emit(False, "已取消")
-                        return
+                        return False, "已取消"
                     if chunk:
                         f.write(chunk)
-                        downloaded += len(chunk)
-                        self.progress.emit(downloaded, total)
+                        n = len(chunk)
+                        downloaded += n
+                        speed_window_bytes += n
 
-            # 使用 os.replace() 代替 Path.rename()：
-            # Windows 上 rename 要求目标不存在（WinError 183），
-            # os.replace() 会原子性覆盖已有文件，两个平台均兼容。
-            os.replace(tmp_path, self._dest)
-            self.finished.emit(True, "下载完成")
+                        now = time.monotonic()
+                        elapsed = now - speed_window_start
+                        if elapsed >= 0.8:
+                            speed = speed_window_bytes / elapsed
+                            speed_window_bytes = 0
+                            speed_window_start = now
+                        else:
+                            speed = 0
+
+                        self.progress.emit(downloaded, total, speed)
+
+            return True, ""
+
+        except requests.exceptions.ConnectTimeout:
+            host = url.split("/")[2]
+            return False, f"连接超时（{host}）"
+        except requests.exceptions.ReadTimeout:
+            return False, "读取超时，网络速度过慢"
+        except requests.exceptions.ConnectionError as e:
+            return False, f"网络连接失败：{e}"
+        except requests.exceptions.HTTPError as e:
+            return False, f"HTTP 错误：{e}"
         except Exception as e:
-            tmp_path.unlink(missing_ok=True)
-            self.finished.emit(False, str(e))
+            return False, str(e)
 
 
 # ─── 单个模型行组件 ───────────────────────────────────────
@@ -201,11 +310,19 @@ class ModelRow(QWidget):
 
         # 进度条（下载时显示）
         self._progress = QProgressBar()
-        self._progress.setFixedWidth(160)
+        self._progress.setFixedWidth(180)
         self._progress.setMaximumHeight(16)
         self._progress.setVisible(False)
         self._progress.setFormat("%p%")
         layout.addWidget(self._progress)
+
+        # 状态提示标签（显示下载速度/当前状态）
+        self._speed_lbl = QLabel("")
+        self._speed_lbl.setFixedWidth(90)
+        self._speed_lbl.setStyleSheet(f"color: {COLOR_TEXT_MUTED}; font-size: 10px;")
+        self._speed_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self._speed_lbl.setVisible(False)
+        layout.addWidget(self._speed_lbl)
 
         # 操作按钮
         self._btn = QPushButton()
@@ -272,10 +389,17 @@ class ModelRow(QWidget):
         self._progress.setVisible(True)
         self._progress.setRange(0, 100)
         self._progress.setValue(0)
+        self._speed_lbl.setVisible(True)
+        self._speed_lbl.setText("连接中…")
 
-        self._thread = DownloadThread(self._info["url"], dest)
+        self._thread = DownloadThread(
+            self._info["url"],
+            self._info.get("mirror_url"),
+            dest,
+        )
         self._thread.progress.connect(self._on_progress)
         self._thread.finished.connect(self._on_finished)
+        self._thread.status_msg.connect(self._on_status_msg)
         self._thread.start()
 
         # 按钮变为取消
@@ -286,17 +410,30 @@ class ModelRow(QWidget):
         if self._thread:
             self._thread.cancel()
 
-    def _on_progress(self, downloaded: int, total: int):
+    def _on_status_msg(self, msg: str):
+        self._speed_lbl.setText(msg[:20])  # 截断显示
+
+    def _on_progress(self, downloaded: int, total: int, speed: float):
         if total > 0:
             pct = int(downloaded * 100 / total)
             self._progress.setValue(pct)
-            mb = downloaded / 1_048_576
-            self._progress.setFormat(f"{mb:.1f} MB / {total/1_048_576:.0f} MB")
+            mb_done = downloaded / 1_048_576
+            mb_total = total / 1_048_576
+            self._progress.setFormat(f"{mb_done:.1f} / {mb_total:.0f} MB")
         else:
             self._progress.setRange(0, 0)
 
+        # 显示下载速度
+        if speed > 0:
+            if speed >= 1_048_576:
+                speed_str = f"{speed/1_048_576:.1f} MB/s"
+            else:
+                speed_str = f"{speed/1024:.0f} KB/s"
+            self._speed_lbl.setText(speed_str)
+
     def _on_finished(self, success: bool, message: str):
         self._progress.setVisible(False)
+        self._speed_lbl.setVisible(False)
         self._thread = None
         self._btn.clicked.disconnect()
         self._btn.clicked.connect(self._on_btn_clicked)
@@ -320,7 +457,7 @@ class ModelDownloadDialog(QDialog):
         super().__init__(parent)
         self._current_model = current_model
         self.setWindowTitle("模型管理")
-        self.setMinimumSize(680, 520)
+        self.setMinimumSize(720, 520)
         self.setStyleSheet(MAIN_STYLE)
         self._setup_ui()
 
@@ -345,6 +482,12 @@ class ModelDownloadDialog(QDialog):
         )
         subtitle.setWordWrap(True)
         layout.addWidget(subtitle)
+
+        # 网络提示
+        net_tip = QLabel("💡 主源（OpenAI CDN）连接失败时会自动切换到备用镜像重试，无需手动操作。")
+        net_tip.setStyleSheet(f"color: {COLOR_ACCENT}; font-size: 11px;")
+        net_tip.setWordWrap(True)
+        layout.addWidget(net_tip)
 
         # FFmpeg 状态
         ffmpeg_ok = check_ffmpeg()
