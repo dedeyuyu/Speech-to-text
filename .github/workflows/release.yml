@@ -107,7 +107,7 @@ jobs:
         shell: powershell
 
       - name: 上传 Windows 产物
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: windows-build
           path: |
@@ -275,7 +275,7 @@ jobs:
           echo "$hash  WhisperSTT_macOS.dmg" > dmg_output/WhisperSTT_macOS.dmg.sha256.txt
 
       - name: 上传 macOS 产物
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: macos-build
           path: |
